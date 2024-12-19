@@ -1,5 +1,17 @@
 import { Schema } from "../validators/ingress.validators";
 
+export const emailPasswordSignUpSchema: Schema = {
+    fields: {
+        email: "string",
+        password: "string",
+        role: "string",
+    },
+    required: [
+        "email",
+        "password",
+    ],
+};
+
 export const emailPasswordSignInSchema: Schema = {
     fields: {
         email: "string",

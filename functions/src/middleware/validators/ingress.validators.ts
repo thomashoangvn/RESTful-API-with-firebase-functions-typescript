@@ -1,4 +1,3 @@
-/* eslint-disable padded-blocks */
 /* eslint-disable require-jsdoc */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable no-useless-escape */
@@ -34,7 +33,6 @@ export type Schema = {
 }
 
 const isRequired = (obj: any, required: string[]) => {
-
     for (const key of required) {
         if (obj[key] === undefined || obj[key] === "") {
             return key;
@@ -42,11 +40,9 @@ const isRequired = (obj: any, required: string[]) => {
     }
 
     return true;
-
 };
 
 export const validateRequiredFields = async (obj: any, model: Schema) => {
-
     if (model.required) {
         const dataField = isRequired(obj, model.required);
         if (dataField !== true) {
@@ -55,21 +51,16 @@ export const validateRequiredFields = async (obj: any, model: Schema) => {
     }
 
     return true;
-
 };
 
 export const validateDataTypes = async (obj: any, model: Schema) => {
-
     for (const key of Object.keys(obj)) {
-
         if (model.fields[key] === undefined) {
             return "null or undefined " + model.fields[key] + " field";
         } else if (typeof obj[key] !== model.fields[key]) {
             return "invalid " + key + " datatype, expected datatype: " + model.fields[key];
         }
-
     }
 
     return true;
-
 };

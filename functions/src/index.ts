@@ -1,36 +1,7 @@
-import * as functions from "firebase-functions";
-import * as admin from "firebase-admin";
-import * as cors from "cors";
-
-import express = require("express");
+import cors from "cors";
 import { RequestHandler } from "express";
-
-import * as serviceAccount from "./certificates/config.json";
-const ServiceAccountPARAMS = {
-
-    type: serviceAccount.type,
-    projectId: serviceAccount.project_id,
-    privateKeyId: serviceAccount.private_key_id,
-    privateKey: serviceAccount.private_key,
-    clientEmail: serviceAccount.client_email,
-    clientId: serviceAccount.client_id,
-    authUri: serviceAccount.auth_uri,
-    tokenUri: serviceAccount.token_uri,
-    authProviderX509CertUrl: serviceAccount.auth_provider_x509_cert_url,
-    clientC509CertUrl: serviceAccount.client_x509_cert_url,
-
-};
-
-admin.initializeApp({
-
-    credential: admin.credential.cert(ServiceAccountPARAMS),
-    databaseURL: "https://<PROJECT ID>.firebaseio.com",
-    storageBucket: "<PROJECT ID>.appspot.com",
-
-});
-
-import { authRoutes } from "./routes/auth.routes";
-import { userRoutes } from "./routes/user.routes";
+import * as https from "firebase-functions/v2/https";
+import express = require("express");
 
 const app = express();
 app.use(express.json() as RequestHandler);
@@ -39,6 +10,9 @@ app.use(express.urlencoded({
 }) as RequestHandler);
 app.use(cors({ origin: true }));
 
+import { authRoutes } from "./routes/auth.routes";
+import { userRoutes } from "./routes/user.routes";
+
 userRoutes(app);
 authRoutes(app);
 
@@ -46,4 +20,10 @@ const runtimeOpts = {
     timeoutSeconds: 180,
 };
 
-export const api = functions.runWith(runtimeOpts).https.onRequest(app);
+// Export API function using Firebase Functions v2
+export const api = https.onRequest(
+    {
+        timeoutSeconds: runtimeOpts.timeoutSeconds,
+    },
+    app
+);

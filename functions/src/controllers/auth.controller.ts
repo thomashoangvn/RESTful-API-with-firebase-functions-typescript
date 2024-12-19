@@ -1,174 +1,360 @@
 /* eslint-disable curly */
-/* eslint-disable padded-blocks */
 /* eslint-disable require-jsdoc */
 
-import { Request, Response, NextFunction } from "express";
-import * as admin from "firebase-admin";
+import { NextFunction, Request, Response } from "express";
+import nodemailer from "nodemailer";
 
-import axios, { AxiosError } from "axios";
+import axios from "axios";
 
-import * as ENVIRONMENT_VARIABLES from "../environments/dev.config";
+import * as ENVIRONMENT_VARIABLES from "../environments/app.config";
 import * as INGRESS_VALIDATOR from "../middleware/validators/ingress.validators";
 
+import { auth, firebaseAdmin, usersCollectionReference } from "../firebaseAdmin";
 import {
     customTokenModel,
     emailPasswordSignInModel,
+    emailPasswordSignUpModel,
+    emailUserModel,
     iDTokensModel,
     reAuthenticationModel,
 } from "../middleware/interfaces/auth.interface";
-import { requestValidator } from "../middleware/validators/request.validator";
+import { mapUser } from "../middleware/interfaces/user.interfaces";
 import {
     customTokenSchema,
     emailPasswordSignInSchema,
+    emailPasswordSignUpSchema,
     iDTokensSchema,
     reAuthenticationSchema,
+    resetEmailSchema,
 } from "../middleware/schema/auth.schema";
+import { requestValidator } from "../middleware/validators/request.validator";
+import { handleError, handleErrorInvalidData, handleResponse } from "../services/handError";
 
-export async function signUserInWithEmailPassword(req: Request, res: Response, next: NextFunction) {
-
+export async function forgotPasswordUserWithEmail(req: Request, res: Response, next: NextFunction) {
     try {
+        const emailForgotPasswordPayload: emailUserModel = req.body;
 
-        const uri: string = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=" + ENVIRONMENT_VARIABLES.API_KEY_VALUE;
-        const emailPasswordSignInPayload: emailPasswordSignInModel = req.body;
+        // Validate the request payload
+        await requestValidator(emailForgotPasswordPayload, resetEmailSchema, res, next);
 
-        return await requestValidator(emailPasswordSignInPayload, emailPasswordSignInSchema, res, next).then(async () => {
+        // Validate the email format
+        if (!INGRESS_VALIDATOR.emailReg.test(emailForgotPasswordPayload.email)) {
+            return handleErrorInvalidData(res, "Invalid email address");
+        }
 
-            if (res.headersSent) return;
+        // Generate the password reset link
+        const resetLink = await auth.generatePasswordResetLink(emailForgotPasswordPayload.email);
 
-            if (!INGRESS_VALIDATOR.emailReg.test(emailPasswordSignInPayload.email)) return res.status(400).send({
-                message: "invalid email address",
-            });
+        // Email options
+        const mailOptions = {
+            from: ENVIRONMENT_VARIABLES.FROM_EMAIL_VERIFIED, // sender address
+            to: emailForgotPasswordPayload.email, // list of receivers
+            subject: "Password Reset", // Subject line
+            text: `You requested a password reset. Click the following link to reset your password: ${resetLink}`, // plain text body
+            html: `<p>You requested a password reset. Click the following link to reset your password:</p><a href="${resetLink}">| Reset Your Password |</a>`, // html body
+        };
 
-            if (!INGRESS_VALIDATOR.passwordReg.test(emailPasswordSignInPayload.password)) return res.status(400).send({
-                message: "invalid password: put password validity pattern here",
-            });
-
-            return await axios.post(uri, {
-
-                email: emailPasswordSignInPayload.email,
-                password: emailPasswordSignInPayload.password,
-                returnSecureToken: true,
-
-            }).then(async (signInResponse) => {
-
-                const userID: string = signInResponse.data.localId;
-                await admin.auth().getUser(userID).then(async (userRecord) => {
-
-                    return res.status(201).send({
-                        response: signInResponse.data,
-                        user_data: userRecord,
-                    });
-
-                }).catch((error) => {
-                    return res.status(400).send(error);
-                });
-
-            }).catch((error) => {
-                return res.status(400).send({
-                    message: error,
-                });
-            });
-
+        // Create the transporter
+        const transporter = nodemailer.createTransport({
+            host: ENVIRONMENT_VARIABLES.MAILING_HOST,
+            port: ENVIRONMENT_VARIABLES.MAILING_PORT,
+            secure: ENVIRONMENT_VARIABLES.MAILING_SECURE,
+            auth: {
+                user: ENVIRONMENT_VARIABLES.MAILING_AUTH_USER,
+                pass: ENVIRONMENT_VARIABLES.MAILING_AUTH_PASS,
+            },
         });
 
-    } catch (error) {
-        const err = error as AxiosError;
-        return res.status(400).send(err.response?.data);
-    }
+        // Send email
+        const info = await transporter.sendMail(mailOptions);
 
+        console.log("Message sent: %s", info.messageId);
+
+        // Send a response
+        return handleResponse(res, info);
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
+    }
+}
+
+export async function signUpAnonymously(req: Request, res: Response) {
+    try {
+        const uri = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${ENVIRONMENT_VARIABLES.API_KEY_VALUE}`;
+
+        // Gửi yêu cầu đăng ký ẩn danh
+        const signUpResponse = await axios.post(uri, {
+            returnSecureToken: true,
+        });
+
+        const userID: string = signUpResponse.data.localId;
+
+        // Đặt quyền tùy chỉnh cho người dùng
+        await auth.setCustomUserClaims(userID, {
+            role: "user",
+            accountType: "anyone",
+        });
+
+        // Lấy thông tin người dùng
+        const userRecord = await auth.getUser(userID);
+        const user = mapUser(userRecord);
+
+        // Lưu thông tin người dùng vào Firestore
+        await usersCollectionReference.doc(userID).set({
+            uid: user.uid ?? userID,
+            email: user.email ?? "",
+            displayName: user.displayName ?? "",
+            role: user.role ?? "user",
+            accountType: user.accountType ?? "anyone",
+            photoURL: user.photoURL ?? "",
+            lastSignInTime: user.lastSignInTime ?? "",
+            creationTime: user.creationTime ?? "",
+            phone: user.phoneNumber ?? "",
+            projectName: ENVIRONMENT_VARIABLES.PROJECT_USING_THIS_AUTHENTICATION ?? "",
+            createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        console.log("Done adding document: ", userID);
+
+        return handleResponse(res, {
+            response: signUpResponse.data,
+            user_data: userRecord,
+            user: user,
+        });
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
+    }
+}
+
+export async function signUpUserWithEmailPassword(req: Request, res: Response, next: NextFunction) {
+    try {
+        const uri = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${ENVIRONMENT_VARIABLES.API_KEY_VALUE}`;
+        const emailPasswordSignUpPayload: emailPasswordSignUpModel = req.body;
+
+        // Validate the request payload
+        await requestValidator(emailPasswordSignUpPayload, emailPasswordSignUpSchema, res, next);
+
+        // Validate email format
+        if (!INGRESS_VALIDATOR.emailReg.test(emailPasswordSignUpPayload.email)) {
+            return handleErrorInvalidData(res, "Invalid email address");
+        }
+
+        // Validate password format
+        if (!INGRESS_VALIDATOR.passwordReg.test(emailPasswordSignUpPayload.password)) {
+            return handleErrorInvalidData(res, "Invalid password");
+        }
+
+        const role: string = emailPasswordSignUpPayload.role ?? "user";
+
+        // Create user in Firebase Auth
+        const signUpResponse = await axios.post(uri, {
+            email: emailPasswordSignUpPayload.email,
+            password: emailPasswordSignUpPayload.password,
+            returnSecureToken: true,
+        });
+
+        const userID: string = signUpResponse.data.localId;
+
+        // Set custom user claims
+        await auth.setCustomUserClaims(userID, {
+            role: role,
+            accountType: "email",
+        });
+
+        // Get user record
+        const userRecord = await auth.getUser(userID);
+        const user = mapUser(userRecord);
+
+        // Save user data in Firestore
+        await usersCollectionReference.doc(userID).set({
+            uid: user.uid ?? userID,
+            email: user.email ?? "",
+            displayName: user.displayName ?? "",
+            role: user.role ?? role ?? "user",
+            accountType: user.accountType ?? "email",
+            photoURL: user.photoURL ?? "",
+            lastSignInTime: user.lastSignInTime ?? "",
+            creationTime: user.creationTime ?? "",
+            phone: user.phoneNumber ?? "",
+            projectName: ENVIRONMENT_VARIABLES.PROJECT_USING_THIS_AUTHENTICATION ?? "",
+            createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+        });
+
+        console.log("Done adding document: ", userID);
+
+        return handleResponse(res, {
+            response: signUpResponse.data,
+            user_data: userRecord,
+            user: user,
+        });
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
+    }
+}
+
+export async function signUserInWithEmailPassword(req: Request, res: Response, next: NextFunction) {
+    try {
+        const uri = `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${ENVIRONMENT_VARIABLES.API_KEY_VALUE}`;
+        const emailPasswordSignInPayload: emailPasswordSignInModel = req.body;
+
+        // Validate the request payload
+        await requestValidator(emailPasswordSignInPayload, emailPasswordSignInSchema, res, next);
+
+        // Validate email and password formats
+        if (!INGRESS_VALIDATOR.emailReg.test(emailPasswordSignInPayload.email)) {
+            return handleErrorInvalidData(res, "Invalid email address");
+        }
+
+        if (!INGRESS_VALIDATOR.passwordReg.test(emailPasswordSignInPayload.password)) {
+            return handleErrorInvalidData(res, "Invalid password");
+        }
+
+        // Sign in the user with email and password
+        const signInResponse = await axios.post(uri, {
+            email: emailPasswordSignInPayload.email,
+            password: emailPasswordSignInPayload.password,
+            returnSecureToken: true,
+        });
+
+        const userID = signInResponse.data.localId;
+
+        // Get user record
+        const userRecord = await auth.getUser(userID);
+        const user = mapUser(userRecord);
+
+        const userDocument = await usersCollectionReference.doc(userID).get();
+        if (!userDocument.exists) {
+            // Save user data in Firestore
+            await usersCollectionReference.doc(userID).set({
+                uid: user.uid ?? userID,
+                email: user.email ?? "",
+                displayName: user.displayName ?? "",
+                role: user.role ?? "user",
+                accountType: user.accountType ?? "email",
+                photoURL: user.photoURL ?? "",
+                lastSignInTime: user.lastSignInTime ?? "",
+                creationTime: user.creationTime ?? "",
+                phone: user.phoneNumber ?? "",
+                projectName: ENVIRONMENT_VARIABLES.PROJECT_USING_THIS_AUTHENTICATION ?? "",
+                createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+            });
+            return handleErrorInvalidData(res, "User not found");
+        }
+
+        return handleResponse(res, {
+            response: signInResponse.data,
+            user_data: userRecord,
+            user: user,
+        });
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
+    }
+}
+
+export async function refreshIdToken(req: Request, res: Response, next: NextFunction) {
+    try {
+        const uri = `https://securetoken.googleapis.com/v1/token?key=${ENVIRONMENT_VARIABLES.API_KEY_VALUE}`;
+        const refreshTokenPayload: reAuthenticationModel = req.body;
+
+        // Validate the request payload
+        await requestValidator(refreshTokenPayload, reAuthenticationSchema, res, next);
+
+        // Refresh the ID token
+        const response = await axios.post(uri, {
+            grant_type: "refresh_token",
+            refresh_token: refreshTokenPayload.refresh_token,
+        }, {
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+        });
+
+        const userID = response.data.user_id;
+
+        // Get user record
+        const userRecord = await auth.getUser(userID);
+        const user = mapUser(userRecord);
+        const userDocument = await usersCollectionReference.doc(userID).get();
+        if (!userDocument.exists) {
+            // Save user data in Firestore
+            await usersCollectionReference.doc(userID).set({
+                uid: user.uid ?? userID,
+                email: user.email ?? "",
+                displayName: user.displayName ?? "",
+                role: user.role ?? "user",
+                accountType: user.accountType ?? "email",
+                photoURL: user.photoURL ?? "",
+                lastSignInTime: user.lastSignInTime ?? "",
+                creationTime: user.creationTime ?? "",
+                phone: user.phoneNumber ?? "",
+                projectName: ENVIRONMENT_VARIABLES.PROJECT_USING_THIS_AUTHENTICATION ?? "",
+                createdAt: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+            });
+            return handleErrorInvalidData(res, "User not found");
+        }
+
+        return handleResponse(res, {
+            response: response.data,
+            user_data: userRecord,
+            user: user,
+        });
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
+    }
 }
 
 export async function GETIdTokens(req: Request, res: Response, next: NextFunction) {
-
     try {
-
-        const uri: string = ENVIRONMENT_VARIABLES.IDENTITY_TOOLKIT_BASE_URL + ENVIRONMENT_VARIABLES.CUSTOM_TOKEN_KEYHOLDER + ENVIRONMENT_VARIABLES.API_KEY_VALUE;
+        const uri = `${ENVIRONMENT_VARIABLES.IDENTITY_TOOLKIT_BASE_URL}${ENVIRONMENT_VARIABLES.CUSTOM_TOKEN_KEYHOLDER}${ENVIRONMENT_VARIABLES.API_KEY_VALUE}`;
         const iDTokensPayload: iDTokensModel = req.body;
 
-        return await requestValidator(iDTokensPayload, iDTokensSchema, res, next).then(async () => {
+        // Validate the request payload
+        await requestValidator(iDTokensPayload, iDTokensSchema, res, next);
 
-            if (res.headersSent) return;
-
-            await axios.post(uri, {
-
-                token: iDTokensPayload.token,
-                returnSecureToken: true,
-
-            }).then((signInResponse) => {
-                return res.status(201).send(signInResponse.data);
-            }).catch((error) => {
-                const err = error as AxiosError;
-                return res.status(400).send(err);
-            });
-
+        // Make a request to get ID tokens
+        const signInResponse = await axios.post(uri, {
+            token: iDTokensPayload.token,
+            returnSecureToken: true,
         });
 
-    } catch (err) {
-        return handleError(res, err);
+        return handleResponse(res, signInResponse.data);
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
     }
-
 }
 
 export async function reAuthenticate(req: Request, res: Response, next: NextFunction) {
-
     try {
-
         const reAuthenticatePayload: reAuthenticationModel = req.body;
-        const uri: string = ENVIRONMENT_VARIABLES.SECURE_API_BASE_URL + ENVIRONMENT_VARIABLES.SECURE_API_KEYHOLDER + ENVIRONMENT_VARIABLES.API_KEY_VALUE;
+        const uri = `${ENVIRONMENT_VARIABLES.SECURE_API_BASE_URL}${ENVIRONMENT_VARIABLES.SECURE_API_KEYHOLDER}${ENVIRONMENT_VARIABLES.API_KEY_VALUE}`;
 
-        return await requestValidator(reAuthenticatePayload, reAuthenticationSchema, res, next).then(async () => {
+        // Validate the request payload
+        await requestValidator(reAuthenticatePayload, reAuthenticationSchema, res, next);
 
-            if (res.headersSent) return;
-
-            await axios.post(uri, {
-
-                grant_type: "refresh_token",
-                refresh_token: reAuthenticatePayload.refresh_token,
-
-            }).then((reAuthResponse) => {
-                return res.status(201).send(reAuthResponse.data);
-            }).catch((error) => {
-                const err = error as AxiosError;
-                return res.status(400).send(err);
-            });
-
+        // Make a request to refresh the token
+        const reAuthResponse = await axios.post(uri, {
+            grant_type: "refresh_token",
+            refresh_token: reAuthenticatePayload.refresh_token,
         });
 
-    } catch (err) {
-        return handleError(res, err);
+        // Send success response
+        return handleResponse(res, reAuthResponse.data);
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
     }
-
 }
 
 export async function GETCustomToken(req: Request, res: Response, next: NextFunction) {
-
     try {
-
         const customTokenPayload: customTokenModel = req.body;
 
-        return await requestValidator(customTokenPayload, customTokenSchema, res, next).then(async () => {
+        // Validate the request payload
+        await requestValidator(customTokenPayload, customTokenSchema, res, next);
 
-            if (res.headersSent) return;
+        // Create a custom token
+        const customToken = await auth.createCustomToken(customTokenPayload.uid);
 
-            admin.auth().createCustomToken(customTokenPayload.uid).then((customToken) => {
-
-                return res.status(201).send({
-                    custom_token: customToken,
-                });
-
-            }).catch((error) => {
-                return res.status(400).send(error);
-            });
-
-        });
-
-    } catch (err) {
-        return handleError(res, err);
+        return handleResponse(res, customToken);
+    } catch (error) {
+        return handleError(res, Error(`error: ${error}`));
     }
-
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function handleError(res: Response, err: any) {
-    return res.status(500).send({ message: `${err.code} - ${err.message}` });
 }

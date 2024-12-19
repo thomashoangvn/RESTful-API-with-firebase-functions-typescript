@@ -1,3 +1,13 @@
+export interface emailUserModel {
+    email: string
+}
+
+export interface emailPasswordSignUpModel {
+    email: string,
+    password: string,
+    role: string
+}
+
 export interface emailPasswordSignInModel {
     email: string,
     password: string
